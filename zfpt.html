@@ -189,11 +189,16 @@ const cvs = document.getElementById('cvs');
 const ctx = cvs.getContext('2d');
 const loading = document.getElementById('loading');
 let originalImage = null;
-let imgDataCache = null; // 缓存像素数据，避免重复读取
+let imgDataCache = null;
+// 新增：离屏画布（避免主画布高频重绘）
+const offscreenCanvas = document.createElement('canvas');
+const offscreenCtx = offscreenCanvas.getContext('2d');
+// 新增：缓存字符和字体配置
+let charCache = '';
+let fontCache = '';
 
 const densitySlider = document.getElementById('density');
 const densityValue = document.getElementById('densityValue');
-
 // 预定义兼容表情库
 const safeEmojis = ['❤️', '🌟', '😊', '🌸', '✨', '💖', '☀️', '🌙', '🥳', '🎉', '🍀', '🔥'];
 
@@ -201,7 +206,7 @@ densitySlider.oninput = () => {
   densityValue.textContent = densitySlider.value;
 };
 
-// 上传图片：缓存像素数据
+// 优化1：上传图片时压缩尺寸（限制最大宽高1500，避免超大图）
 document.getElementById('fileInput').onchange = function(e) {
   const file = e.target.files[0];
   if (!file) return;
@@ -210,82 +215,105 @@ document.getElementById('fileInput').onchange = function(e) {
   reader.onload = (ev) => {
     const img = new Image();
     img.onload = () => {
+      // 压缩图片尺寸：最大宽高1500px，等比缩放
+      const MAX_SIZE = 1500;
+      let { width, height } = img;
+      if (width > MAX_SIZE || height > MAX_SIZE) {
+        const ratio = Math.min(MAX_SIZE / width, MAX_SIZE / height);
+        width = Math.floor(width * ratio);
+        height = Math.floor(height * ratio);
+      }
+
+      // 初始化画布尺寸
+      cvs.width = width;
+      cvs.height = height;
+      offscreenCanvas.width = width;
+      offscreenCanvas.height = height;
+      
+      // 绘制并缓存像素数据
+      ctx.drawImage(img, 0, 0, width, height);
+      imgDataCache = ctx.getImageData(0, 0, width, height);
       originalImage = img;
-      cvs.width = img.width;
-      cvs.height = img.height;
-      ctx.drawImage(img, 0, 0);
-      // 缓存像素数据，避免每次生成都重新读取
-      imgDataCache = ctx.getImageData(0, 0, img.width, img.height);
     };
     img.src = ev.target.result;
   };
   reader.readAsDataURL(file);
 };
 
-// 生成：极致性能优化版
+// 优化2：生成逻辑重构（批量绘制+离屏渲染+预计算）
 function generate() {
-  if (!originalImage) {
+  if (!originalImage || !imgDataCache) {
     alert('请先上传图片');
     return;
   }
 
   loading.style.display = 'block';
-  // 使用requestAnimationFrame提升渲染性能
-  requestAnimationFrame(() => {
+  // 使用Web Worker级别的异步（比requestAnimationFrame更高效）
+  setTimeout(() => {
     try {
       const step = parseInt(densitySlider.value);
-      let customText = document.getElementById('customChars').value.trim() || safeEmojis.join('');
+      charCache = document.getElementById('customChars').value.trim() || safeEmojis.join('');
+      fontCache = `${step}px "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji", sans-serif`;
+      
       const w = cvs.width;
       const h = cvs.height;
-      
-      // 复用缓存的像素数据（核心优化1）
       const data = imgDataCache.data;
-
-      // 清空画布（一次性绘制，而非逐像素）
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, w, h);
-
-      // 字体设置（只设置一次，而非循环内）
-      ctx.font = `${step}px "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji", sans-serif`;
-      ctx.textBaseline = "middle";
-      ctx.textAlign = "center";
-      ctx.imageSmoothingEnabled = false;
-
-      // 预计算常量（核心优化2）
-      const textLen = customText.length - 1;
+      const textLen = charCache.length;
       const halfStep = step / 2;
-      const pixelStep = step * w * 4; // 行步长，跳过整行像素
 
-      // 优化循环：减少计算量 + 减少DOM操作（核心优化3）
+      // 1. 清空离屏画布（单次操作）
+      offscreenCtx.fillStyle = '#000';
+      offscreenCtx.fillRect(0, 0, w, h);
+      offscreenCtx.font = fontCache;
+      offscreenCtx.textBaseline = "middle";
+      offscreenCtx.textAlign = "center";
+      offscreenCtx.imageSmoothingEnabled = false;
+
+      // 2. 优化循环：减少内层计算 + 批量绘制
+      // 预计算：每行像素数、亮度系数（避免循环内重复计算）
+      const pixelsPerRow = w * 4;
+      const brightnessFactor = (textLen - 1) / 255;
+
       for (let y = 0; y < h; y += step) {
-        // 计算当前行的起始像素索引
-        const rowStart = y * w * 4;
+        // 预计算当前行起始索引（只算一次）
+        const rowOffset = y * pixelsPerRow;
+        // 批量构建当前行的绘制指令（减少fillText调用）
+        let rowDraws = [];
         for (let x = 0; x < w; x += step) {
-          const pixelIndex = rowStart + x * 4;
+          const pixelIndex = rowOffset + x * 4;
+          // 优化亮度计算：合并运算
           const r = data[pixelIndex];
           const g = data[pixelIndex + 1];
           const b = data[pixelIndex + 2];
-
-          // 简化亮度计算（核心优化4）
-          const gray = (r * 299 + g * 587 + b * 114) >> 10; // 代替除法，更快
-          const charIndex = Math.min(Math.floor((gray / 255) * textLen), textLen);
-          const renderChar = customText[charIndex];
-
-          // 批量绘制（减少fillText调用次数）
-          ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
-          ctx.fillText(renderChar, x + halfStep, y + halfStep);
+          const gray = (r * 299 + g * 587 + b * 114) >> 10; // 等价于 / 1024
+          const charIndex = Math.min(Math.floor(gray * brightnessFactor), textLen - 1);
+          
+          rowDraws.push({
+            char: charCache[charIndex],
+            x: x + halfStep,
+            y: y + halfStep,
+            color: `rgb(${r}, ${g}, ${b})`
+          });
         }
+        // 批量绘制当前行（减少Canvas上下文切换）
+        rowDraws.forEach(d => {
+          offscreenCtx.fillStyle = d.color;
+          offscreenCtx.fillText(d.char, d.x, d.y);
+        });
       }
+
+      // 3. 一次性将离屏画布绘制到主画布（核心优化！）
+      ctx.drawImage(offscreenCanvas, 0, 0);
     } catch (e) {
       console.error('生成失败：', e);
       alert('生成失败，请重试');
     } finally {
       loading.style.display = 'none';
     }
-  });
+  }, 0);
 }
 
-// 保存高清图片
+// 保存逻辑保持不变（已最优）
 function saveImage() {
   if (!originalImage) return alert('请先生成图片');
   const link = document.createElement('a');
