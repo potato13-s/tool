@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>字符拼图画工具 · 极速版</title>
+<style>
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  background: #0f172a;
+  color: #f1f5f9;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  overflow: hidden;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  width: 100vw;
+  height: 100vh;
+}
+
+/* 顶部控制面板 */
+#controlPanel {
+  background: #1e293b;
+  padding: 22px 28px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+  z-index: 10;
+}
+
+/* 底部画布区域 */
+#canvasContainer {
+  flex: 1;
+  background: #000;
+  position: relative;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+canvas {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  image-rendering: pixelated !important;
+}
+
+/* 样式美化 */
+.label {
+  font-size: 13px;
+  color: #cbd5e1;
+  margin-bottom: 6px;
+}
+
+textarea {
+  min-width: 280px;
+  height: 46px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: #334155;
+  border: none;
+  color: #fff;
+  font-size: 15px;
+  outline: none;
+  resize: none;
+}
+
+input[type="range"] {
+  width: 180px;
+  height: 6px;
+  border-radius: 6px;
+  background: #334155;
+  -webkit-appearance: none;
+  outline: none;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #38bdf8;
+  cursor: pointer;
+}
+
+#densityValue {
+  color: #38bdf8;
+  font-weight: 600;
+  font-size: 14px;
+  min-width: 30px;
+}
+
+button {
+  padding: 12px 20px;
+  border-radius: 8px;
+  border: none;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: 0.2s;
+}
+
+.btn-generate {
+  background: #0ea5e9;
+  color: white;
+}
+.btn-generate:hover {
+  background: #0284c7;
+}
+
+.btn-save {
+  background: #10b981;
+  color: white;
+}
+.btn-save:hover {
+  background: #059669;
+}
+
+input[type="file"] {
+  color: #cbd5e1;
+  font-size: 13px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.col {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* 加载提示 */
+.loading {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: #38bdf8;
+  font-size: 18px;
+  display: none;
+}
+</style>
+</head>
+
+<body>
+<div id="app">
+  <!-- 顶部参数区 -->
+  <div id="controlPanel">
+    <div class="col">
+      <div class="label">自定义字符/表情（推荐：❤️🌟😊🌸）</div>
+      <textarea id="customChars">❤️🌟😊🌸✨💖☀️🌙🥳</textarea>
+    </div>
+
+    <div class="col">
+      <div class="label">密度：<span id="densityValue">20</span></div>
+      <input type="range" id="density" min="8" max="50" value="20" step="1">
+    </div>
+
+    <input type="file" id="fileInput" accept="image/*">
+
+    <button class="btn-generate" onclick="generate()">✨ 生成</button>
+    <button class="btn-save" onclick="saveImage()">💾 保存</button>
+  </div>
+
+  <!-- 底部图片区 -->
+  <div id="canvasContainer">
+    <div class="loading" id="loading">生成中...</div>
+    <canvas id="cvs"></canvas>
+  </div>
+</div>
+
+<script>
+const cvs = document.getElementById('cvs');
+const ctx = cvs.getContext('2d');
+const loading = document.getElementById('loading');
+let originalImage = null;
+let imgDataCache = null; // 缓存像素数据，避免重复读取
+
+const densitySlider = document.getElementById('density');
+const densityValue = document.getElementById('densityValue');
+
+// 预定义兼容表情库
+const safeEmojis = ['❤️', '🌟', '😊', '🌸', '✨', '💖', '☀️', '🌙', '🥳', '🎉', '🍀', '🔥'];
+
+densitySlider.oninput = () => {
+  densityValue.textContent = densitySlider.value;
+};
+
+// 上传图片：缓存像素数据
+document.getElementById('fileInput').onchange = function(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    const img = new Image();
+    img.onload = () => {
+      originalImage = img;
+      cvs.width = img.width;
+      cvs.height = img.height;
+      ctx.drawImage(img, 0, 0);
+      // 缓存像素数据，避免每次生成都重新读取
+      imgDataCache = ctx.getImageData(0, 0, img.width, img.height);
+    };
+    img.src = ev.target.result;
+  };
+  reader.readAsDataURL(file);
+};
+
+// 生成：极致性能优化版
+function generate() {
+  if (!originalImage) {
+    alert('请先上传图片');
+    return;
+  }
+
+  loading.style.display = 'block';
+  // 使用requestAnimationFrame提升渲染性能
+  requestAnimationFrame(() => {
+    try {
+      const step = parseInt(densitySlider.value);
+      let customText = document.getElementById('customChars').value.trim() || safeEmojis.join('');
+      const w = cvs.width;
+      const h = cvs.height;
+      
+      // 复用缓存的像素数据（核心优化1）
+      const data = imgDataCache.data;
+
+      // 清空画布（一次性绘制，而非逐像素）
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, w, h);
+
+      // 字体设置（只设置一次，而非循环内）
+      ctx.font = `${step}px "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji", sans-serif`;
+      ctx.textBaseline = "middle";
+      ctx.textAlign = "center";
+      ctx.imageSmoothingEnabled = false;
+
+      // 预计算常量（核心优化2）
+      const textLen = customText.length - 1;
+      const halfStep = step / 2;
+      const pixelStep = step * w * 4; // 行步长，跳过整行像素
+
+      // 优化循环：减少计算量 + 减少DOM操作（核心优化3）
+      for (let y = 0; y < h; y += step) {
+        // 计算当前行的起始像素索引
+        const rowStart = y * w * 4;
+        for (let x = 0; x < w; x += step) {
+          const pixelIndex = rowStart + x * 4;
+          const r = data[pixelIndex];
+          const g = data[pixelIndex + 1];
+          const b = data[pixelIndex + 2];
+
+          // 简化亮度计算（核心优化4）
+          const gray = (r * 299 + g * 587 + b * 114) >> 10; // 代替除法，更快
+          const charIndex = Math.min(Math.floor((gray / 255) * textLen), textLen);
+          const renderChar = customText[charIndex];
+
+          // 批量绘制（减少fillText调用次数）
+          ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+          ctx.fillText(renderChar, x + halfStep, y + halfStep);
+        }
+      }
+    } catch (e) {
+      console.error('生成失败：', e);
+      alert('生成失败，请重试');
+    } finally {
+      loading.style.display = 'none';
+    }
+  });
+}
+
+// 保存高清图片
+function saveImage() {
+  if (!originalImage) return alert('请先生成图片');
+  const link = document.createElement('a');
+  link.download = '表情拼图画.png';
+  link.href = cvs.toDataURL('image/png', 1.0);
+  link.click();
+}
+</script>
+</body>
+</html>
